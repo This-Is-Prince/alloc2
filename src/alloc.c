@@ -1,30 +1,48 @@
 #include "alloc.h"
-#include <sys/_types/_null.h>
 #include <unistd.h>
 #include "types.h"
+#include <errno.h>
 
-void* heap;
+static void* heap_start = NULL;
+static void* heap_end = NULL;
 
-void* find_header(void* mem_start, size_t size) {
-    header *h = (header*)mem_start;
+static header* request_more_memory(size_t size) {
+    size_t total_alloc_size = size + sizeof(header);
 
-    if (h->size == 0) {
-        if (sbrk(size + sizeof(header)) == NoMem) {
-            return NoMem;
+    void* current_break = sbrk(0);
+    if (sbrk(total_alloc_size) == ALLOC_FAIL) {
+        errno = ENOMEM;
+        return NULL;
+    }
+
+    heap_end = (void*)current_break + total_alloc_size;
+    header* h = (header*)current_break;
+    h->size = size;
+    h->allocated = true;
+    return h;
+}
+
+static header* find_free_block(size_t size) {
+    header* current = (header*)heap_start;
+
+    while ((void*)current < heap_end) {
+        if (!current->allocated && current->size >= size) {
+            if (current->size > (size + MIN_BLOCK_SIZE)) {
+                header* split_block = (header*)((void*)current + size + sizeof(header));
+                split_block->size = current->size - size - sizeof(header);
+                split_block->allocated = false;
+
+                current->size = size;
+            }
+
+            current->allocated = true;
+            return current;
         }
 
-        h->size = size;
-        h->allocated = true;
-
-        return h;
-    } else if (h->size == size && h->allocated == false) {
-        h->allocated = true;
-
-        return h;
-    } else {
-        void* next_mem_start = mem_start + sizeof(header) + h->size;
-        return find_header(next_mem_start, size);
+        current = (header*)((void*)current + sizeof(header) + current->size);
     }
+
+    return request_more_memory(size);
 }
 
 void* alloc(size_t size) {
@@ -32,13 +50,24 @@ void* alloc(size_t size) {
         return NULL;
     }
 
-    if (heap == NULL) {
-        heap = sbrk(0);
+    if (size > MAX_ALLOC_SIZE) {
+        errno = EINVAL;
+        return NULL;
     }
 
-    header *h = find_header(heap, size);
-    if (h == NoMem) {
-        return NoMem;
+    if (heap_start == NULL) {
+        heap_start = sbrk(0);
+        heap_end = heap_start;
+        if (heap_start == ALLOC_FAIL) {
+            errno = ENOMEM;
+            return NULL;
+        }
+    }
+
+    header* h = find_free_block(size);
+
+    if (h == NULL) {
+        return NULL;
     }
 
     return (void*)h + sizeof(header);
@@ -49,9 +78,11 @@ void dealloc(void* mem) {
         return;
     }
 
-    header *h = mem - sizeof(header);
+    header *h = (header*)(mem - sizeof(header));
 
-    if (h->size > 0 && h->allocated) {
-        h->allocated = false;
+    if ((void*)h < heap_start || (void*)h >= heap_end) {
+        return;
     }
+
+    h->allocated = false;
 }
